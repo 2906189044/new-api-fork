@@ -8,6 +8,12 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
+var subscriptionPlanUsableGroups = map[string][]string{
+	"plan_codex_basic":    {"gpt_core"},
+	"plan_codex_advanced": {"gpt_core", "gpt52_unlimited"},
+	"plan_coding_all":     {"gpt_core", "gpt52_unlimited", "claude_core", "gemini_core", "upstream"},
+}
+
 func GetUserUsableGroups(userGroup string) map[string]string {
 	return getUserUsableGroupsBase(userGroup)
 }
@@ -55,6 +61,16 @@ func bonusScopeUsableGroups(scope string) []string {
 
 func GetUserUsableGroupsForUser(userId int, userGroup string) map[string]string {
 	groupsCopy := getUserUsableGroupsBase(userGroup)
+	for _, group := range subscriptionPlanUsableGroups[strings.TrimSpace(userGroup)] {
+		if _, ok := groupsCopy[group]; ok {
+			continue
+		}
+		desc := setting.GetUsableGroupDescription(group)
+		if strings.TrimSpace(desc) == "" {
+			desc = "订阅套餐权益"
+		}
+		groupsCopy[group] = desc
+	}
 	if userId <= 0 {
 		return groupsCopy
 	}

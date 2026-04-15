@@ -9,12 +9,17 @@ import (
 )
 
 func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string]string) []model.Pricing {
+	if len(usableGroup) == 0 {
+		return pricing
+	}
 	filtered := make([]model.Pricing, 0, len(pricing))
 	for _, row := range pricing {
-		if len(row.EnableGroup) == 1 && row.EnableGroup[0] == "upstream" {
-			continue
+		for _, group := range row.EnableGroup {
+			if _, ok := usableGroup[group]; ok {
+				filtered = append(filtered, row)
+				break
+			}
 		}
-		filtered = append(filtered, row)
 	}
 	return filtered
 }

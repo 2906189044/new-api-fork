@@ -81,3 +81,38 @@ func TestGetUserUsableGroupsForUserIncludesGPTBonusGroups(t *testing.T) {
 		t.Fatal("expected gpt52_unlimited to become usable for bonus user")
 	}
 }
+
+func TestGetUserUsableGroupsForUserIncludesCodexBasicGroups(t *testing.T) {
+	usableGroups := GetUserUsableGroupsForUser(0, "plan_codex_basic")
+	if _, ok := usableGroups["gpt_core"]; !ok {
+		t.Fatal("expected codex basic plan to include gpt_core")
+	}
+	if _, ok := usableGroups["claude_core"]; ok {
+		t.Fatal("did not expect codex basic plan to include claude_core")
+	}
+	if _, ok := usableGroups["upstream"]; ok {
+		t.Fatal("did not expect codex basic plan to include upstream")
+	}
+}
+
+func TestGetUserUsableGroupsForUserIncludesCodexAdvancedUnlimitedGroups(t *testing.T) {
+	usableGroups := GetUserUsableGroupsForUser(0, "plan_codex_advanced")
+	if _, ok := usableGroups["gpt_core"]; !ok {
+		t.Fatal("expected codex advanced plan to include gpt_core")
+	}
+	if _, ok := usableGroups["gpt52_unlimited"]; !ok {
+		t.Fatal("expected codex advanced plan to include gpt52_unlimited")
+	}
+	if _, ok := usableGroups["claude_core"]; ok {
+		t.Fatal("did not expect codex advanced plan to include claude_core")
+	}
+}
+
+func TestGetUserUsableGroupsForUserIncludesCodingPlanAllModelGroups(t *testing.T) {
+	usableGroups := GetUserUsableGroupsForUser(0, "plan_coding_all")
+	for _, group := range []string{"gpt_core", "gpt52_unlimited", "claude_core", "gemini_core", "upstream"} {
+		if _, ok := usableGroups[group]; !ok {
+			t.Fatalf("expected coding plan to include %s", group)
+		}
+	}
+}
