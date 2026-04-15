@@ -7,5 +7,5 @@ if [[ $# -ne 1 ]]; then
 fi
 
 echo "Releasing $1 to staging"
-/opt/new-api-staging/scripts/deploy.sh "$1"
+"$(cd "$(dirname "$0")" && pwd)/deploy-runtime.sh" /opt/new-api-staging "$1"
 echo "Staging released with $1"

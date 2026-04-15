@@ -7,7 +7,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 echo "Promoting $1 to production"
-/opt/new-api/scripts/deploy.sh "$1"
+"$(cd "$(dirname "$0")" && pwd)/deploy-runtime.sh" /opt/new-api "$1"
 echo "Verifying production health"
 for _ in $(seq 1 12); do
   if curl -fsS http://127.0.0.1:13000/api/status >/tmp/newapi-production-status.json 2>/dev/null; then

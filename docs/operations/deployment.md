@@ -36,3 +36,6 @@ If staging is approved, promote the exact tag shown by the script:
 - Do not hand-edit container contents.
 - Do not publish unverified tags to production.
 - If a release needs schema changes or data repair, stop for human confirmation first.
+- Production compose project name is fixed to `newapi`.
+- Staging compose project name is fixed to `newapi-staging`.
+- Always deploy through the repo scripts so Docker Compose cannot derive a different project name from the directory and accidentally create a parallel stack.
