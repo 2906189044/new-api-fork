@@ -11,3 +11,4 @@
 
 - Rollback is image-based. Do not attempt emergency hotfixes inside the running container.
 - Database restore is a separate operation and requires human confirmation.
+- If the latest release fails in production, re-run `/opt/new-api/scripts/rollback.sh <last-good-tag>` and then verify `/api/status`.

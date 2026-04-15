@@ -6,5 +6,6 @@ if [[ $# -ne 1 ]]; then
   exit 1
 fi
 
+echo "Releasing $1 to staging"
 /opt/new-api-staging/scripts/deploy.sh "$1"
 echo "Staging released with $1"

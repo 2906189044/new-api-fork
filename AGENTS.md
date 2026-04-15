@@ -35,6 +35,7 @@ Human confirmation is required before any of the following:
 - Compose files stay stable; image changes go through `APP_IMAGE` in the respective `.env` file.
 - Image tags must be traceable to Git commits, format: `newapi-local:main-<short_sha>`.
 - Keep only a small rollback window of recent images.
+- Preferred server release flow is `/home/admin/src/new-api/scripts/update-staging.sh` followed by `/home/admin/src/new-api/scripts/promote-to-production.sh <tag>`.
 
 ## Project-Specific Safety Notes
 
