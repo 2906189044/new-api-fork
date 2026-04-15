@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
+	"gorm.io/gorm"
 )
 
 type SubscriptionEpayPayRequest struct {
@@ -38,8 +39,8 @@ func SubscriptionRequestEpay(c *gin.Context) {
 		common.ApiErrorMsg(c, "套餐未启用")
 		return
 	}
-	if plan.PriceAmount < 0.01 {
-		common.ApiErrorMsg(c, "套餐金额过低")
+	if !plan.VisibleToUser || plan.StackableBonus {
+		common.ApiErrorMsg(c, "该套餐不可直接购买")
 		return
 	}
 	if !operation_setting.ContainsPayMethod(req.PaymentMethod) {
@@ -48,17 +49,6 @@ func SubscriptionRequestEpay(c *gin.Context) {
 	}
 
 	userId := c.GetInt("id")
-	if plan.MaxPurchasePerUser > 0 {
-		count, err := model.CountUserSubscriptionsByPlan(userId, plan.Id)
-		if err != nil {
-			common.ApiError(c, err)
-			return
-		}
-		if count >= int64(plan.MaxPurchasePerUser) {
-			common.ApiErrorMsg(c, "已达到该套餐购买上限")
-			return
-		}
-	}
 
 	callBackAddress := service.GetCallbackAddress()
 	returnUrl, err := url.Parse(callBackAddress + "/api/subscription/epay/return")
@@ -81,24 +71,29 @@ func SubscriptionRequestEpay(c *gin.Context) {
 		return
 	}
 
-	order := &model.SubscriptionOrder{
-		UserId:        userId,
-		PlanId:        plan.Id,
-		Money:         plan.PriceAmount,
-		TradeNo:       tradeNo,
-		PaymentMethod: req.PaymentMethod,
-		CreateTime:    time.Now().Unix(),
-		Status:        common.TopUpStatusPending,
+	var order *model.SubscriptionOrder
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
+		created, _, err := model.CreateSubscriptionOrderTx(tx, userId, plan, req.PaymentMethod, tradeNo, time.Now().Unix())
+		if err != nil {
+			return err
+		}
+		order = created
+		return nil
+	})
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
-	if err := order.Insert(); err != nil {
-		common.ApiErrorMsg(c, "创建订单失败")
+	if order.Money < 0.01 {
+		_ = model.ExpireSubscriptionOrder(tradeNo)
+		common.ApiErrorMsg(c, "当前订单金额过低")
 		return
 	}
 	uri, params, err := client.Purchase(&epay.PurchaseArgs{
 		Type:           req.PaymentMethod,
 		ServiceTradeNo: tradeNo,
 		Name:           fmt.Sprintf("SUB:%s", plan.Title),
-		Money:          strconv.FormatFloat(plan.PriceAmount, 'f', 2, 64),
+		Money:          strconv.FormatFloat(order.Money, 'f', 2, 64),
 		Device:         epay.PC,
 		NotifyUrl:      notifyUrl,
 		ReturnUrl:      returnUrl,

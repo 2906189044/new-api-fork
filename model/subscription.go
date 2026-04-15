@@ -1,8 +1,10 @@
 package model
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +37,7 @@ const (
 var (
 	ErrSubscriptionOrderNotFound      = errors.New("subscription order not found")
 	ErrSubscriptionOrderStatusInvalid = errors.New("subscription order status invalid")
+	ErrSubscriptionPlanDowngrade      = errors.New("已有主套餐时，只能购买当前套餐或更高档套餐")
 )
 
 const (
@@ -159,9 +162,9 @@ type SubscriptionPlan struct {
 	DurationValue int    `json:"duration_value" gorm:"type:int;not null;default:1"`
 	CustomSeconds int64  `json:"custom_seconds" gorm:"type:bigint;not null;default:0"`
 
-	Enabled   bool `json:"enabled" gorm:"default:true"`
+	Enabled       bool `json:"enabled" gorm:"default:true"`
 	VisibleToUser bool `json:"visible_to_user" gorm:"default:true"`
-	SortOrder int  `json:"sort_order" gorm:"type:int;default:0"`
+	SortOrder     int  `json:"sort_order" gorm:"type:int;default:0"`
 
 	StripePriceId  string `json:"stripe_price_id" gorm:"type:varchar(128);default:''"`
 	CreemProductId string `json:"creem_product_id" gorm:"type:varchar(128);default:''"`
@@ -173,7 +176,7 @@ type SubscriptionPlan struct {
 	UpgradeGroup string `json:"upgrade_group" gorm:"type:varchar(64);default:''"`
 
 	// Stackable bonus plans do not override the user's primary group.
-	StackableBonus bool   `json:"stackable_bonus" gorm:"default:false"`
+	StackableBonus  bool   `json:"stackable_bonus" gorm:"default:false"`
 	BonusModelScope string `json:"bonus_model_scope" gorm:"type:varchar(32);default:''"`
 
 	// Total quota (amount in quota units, 0 = unlimited)
@@ -213,6 +216,20 @@ type SubscriptionOrder struct {
 	CompleteTime  int64  `json:"complete_time"`
 
 	ProviderPayload string `json:"provider_payload" gorm:"type:text"`
+}
+
+const (
+	SubscriptionPurchaseModeNew     = "new"
+	SubscriptionPurchaseModeRenew   = "renew"
+	SubscriptionPurchaseModeUpgrade = "upgrade"
+)
+
+type SubscriptionPurchaseContext struct {
+	Mode                  string  `json:"mode"`
+	ChargeAmount          float64 `json:"charge_amount"`
+	CurrentSubscriptionId int     `json:"current_subscription_id,omitempty"`
+	CurrentPlanId         int     `json:"current_plan_id,omitempty"`
+	CurrentEndTime        int64   `json:"current_end_time,omitempty"`
 }
 
 func (o *SubscriptionOrder) Insert() error {
@@ -393,6 +410,175 @@ func CountUserSubscriptionsByPlan(userId int, planId int) (int64, error) {
 	return count, nil
 }
 
+func compareVisiblePlanRank(a *SubscriptionPlan, b *SubscriptionPlan) int {
+	if a == nil || b == nil {
+		return 0
+	}
+	if a.SortOrder != b.SortOrder {
+		if a.SortOrder > b.SortOrder {
+			return 1
+		}
+		return -1
+	}
+	if a.Id == b.Id {
+		return 0
+	}
+	if a.Id > b.Id {
+		return 1
+	}
+	return -1
+}
+
+func normalizeMoneyAmount(v float64) float64 {
+	return math.Round(v*100) / 100
+}
+
+func encodeSubscriptionPurchaseContext(ctx SubscriptionPurchaseContext) string {
+	raw, err := json.Marshal(ctx)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func decodeSubscriptionPurchaseContext(raw string) (SubscriptionPurchaseContext, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return SubscriptionPurchaseContext{}, false
+	}
+	var ctx SubscriptionPurchaseContext
+	if err := json.Unmarshal([]byte(raw), &ctx); err != nil {
+		return SubscriptionPurchaseContext{}, false
+	}
+	return ctx, true
+}
+
+func getActivePrimarySubscriptionTx(tx *gorm.DB, userId int) (*UserSubscription, *SubscriptionPlan, error) {
+	if tx == nil {
+		return nil, nil, errors.New("tx is nil")
+	}
+	if userId <= 0 {
+		return nil, nil, errors.New("invalid userId")
+	}
+	now := GetDBTimestamp()
+	var row struct {
+		UserSubscription
+		PlanTitle       string
+		PlanSortOrder   int
+		PlanVisible     bool
+		PlanStackable   bool
+		PlanPriceAmount float64
+	}
+	err := tx.Table("user_subscriptions us").
+		Select("us.*, sp.title as plan_title, sp.sort_order as plan_sort_order, sp.visible_to_user as plan_visible, sp.stackable_bonus as plan_stackable, sp.price_amount as plan_price_amount").
+		Joins("JOIN subscription_plans sp ON sp.id = us.plan_id").
+		Where("us.user_id = ? AND us.status = ? AND us.end_time > ? AND sp.stackable_bonus = ?", userId, "active", now, false).
+		Order("us.end_time desc, us.id desc").
+		Limit(1).
+		Scan(&row).Error
+	if err != nil {
+		return nil, nil, err
+	}
+	if row.Id == 0 {
+		return nil, nil, nil
+	}
+	plan, err := getSubscriptionPlanByIdTx(tx, row.PlanId)
+	if err != nil {
+		return nil, nil, err
+	}
+	sub := row.UserSubscription
+	return &sub, plan, nil
+}
+
+// ResolveSubscriptionPurchaseTx applies the运营 purchase rules for user-visible main plans:
+// - hidden/stackable bonus plans do not participate in upgrade comparisons
+// - with an active main plan, only the same plan (renew) or a higher displayed plan (upgrade) is allowed
+// - upgrades charge only the visible list-price difference and keep the original expiry at completion time
+func ResolveSubscriptionPurchaseTx(tx *gorm.DB, userId int, plan *SubscriptionPlan) (*SubscriptionPurchaseContext, error) {
+	if tx == nil {
+		return nil, errors.New("tx is nil")
+	}
+	if userId <= 0 {
+		return nil, errors.New("invalid userId")
+	}
+	if plan == nil || plan.Id <= 0 {
+		return nil, errors.New("invalid plan")
+	}
+	ctx := &SubscriptionPurchaseContext{
+		Mode:         SubscriptionPurchaseModeNew,
+		ChargeAmount: normalizeMoneyAmount(plan.PriceAmount),
+	}
+	if plan.StackableBonus || !plan.VisibleToUser {
+		return ctx, nil
+	}
+	currentSub, currentPlan, err := getActivePrimarySubscriptionTx(tx, userId)
+	if err != nil {
+		return nil, err
+	}
+	if currentSub == nil || currentPlan == nil {
+		return ctx, nil
+	}
+	ctx.CurrentSubscriptionId = currentSub.Id
+	ctx.CurrentPlanId = currentPlan.Id
+	ctx.CurrentEndTime = currentSub.EndTime
+	if currentPlan.Id == plan.Id {
+		ctx.Mode = SubscriptionPurchaseModeRenew
+		return ctx, nil
+	}
+	if compareVisiblePlanRank(plan, currentPlan) < 0 {
+		return nil, ErrSubscriptionPlanDowngrade
+	}
+	ctx.Mode = SubscriptionPurchaseModeUpgrade
+	ctx.ChargeAmount = normalizeMoneyAmount(plan.PriceAmount - currentPlan.PriceAmount)
+	if ctx.ChargeAmount < 0 {
+		ctx.ChargeAmount = 0
+	}
+	return ctx, nil
+}
+
+// CreateSubscriptionOrderTx snapshots the purchase mode into ProviderPayload so payment completion
+// can safely execute renew vs upgrade behavior even if the runtime state changes later.
+func CreateSubscriptionOrderTx(tx *gorm.DB, userId int, plan *SubscriptionPlan, paymentMethod string, tradeNo string, createTime int64) (*SubscriptionOrder, *SubscriptionPurchaseContext, error) {
+	if tx == nil {
+		return nil, nil, errors.New("tx is nil")
+	}
+	if userId <= 0 {
+		return nil, nil, errors.New("invalid userId")
+	}
+	if plan == nil || plan.Id <= 0 {
+		return nil, nil, errors.New("invalid plan")
+	}
+	if plan.MaxPurchasePerUser > 0 {
+		var count int64
+		if err := tx.Model(&UserSubscription{}).
+			Where("user_id = ? AND plan_id = ?", userId, plan.Id).
+			Count(&count).Error; err != nil {
+			return nil, nil, err
+		}
+		if count >= int64(plan.MaxPurchasePerUser) {
+			return nil, nil, errors.New("已达到该套餐购买上限")
+		}
+	}
+	ctx, err := ResolveSubscriptionPurchaseTx(tx, userId, plan)
+	if err != nil {
+		return nil, nil, err
+	}
+	order := &SubscriptionOrder{
+		UserId:          userId,
+		PlanId:          plan.Id,
+		Money:           ctx.ChargeAmount,
+		TradeNo:         tradeNo,
+		PaymentMethod:   paymentMethod,
+		CreateTime:      createTime,
+		Status:          common.TopUpStatusPending,
+		ProviderPayload: encodeSubscriptionPurchaseContext(*ctx),
+	}
+	if err := tx.Create(order).Error; err != nil {
+		return nil, nil, err
+	}
+	return order, ctx, nil
+}
+
 func getUserGroupByIdTx(tx *gorm.DB, userId int) (string, error) {
 	if userId <= 0 {
 		return "", errors.New("invalid userId")
@@ -515,6 +701,87 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 	return sub, nil
 }
 
+func extendSubscriptionFromPlanTx(tx *gorm.DB, sub *UserSubscription, plan *SubscriptionPlan) error {
+	if tx == nil || sub == nil || plan == nil {
+		return errors.New("invalid renewal args")
+	}
+	base := time.Unix(sub.EndTime, 0)
+	if base.Unix() <= 0 {
+		base = time.Unix(GetDBTimestamp(), 0)
+	}
+	endUnix, err := calcPlanEndTime(base, plan)
+	if err != nil {
+		return err
+	}
+	resetBase := base
+	nextReset := calcNextResetTime(resetBase, plan, endUnix)
+	updateMap := map[string]interface{}{
+		"end_time":   endUnix,
+		"updated_at": common.GetTimestamp(),
+	}
+	if nextReset > 0 {
+		updateMap["next_reset_time"] = nextReset
+		if sub.LastResetTime == 0 {
+			updateMap["last_reset_time"] = GetDBTimestamp()
+		}
+	}
+	return tx.Model(&UserSubscription{}).Where("id = ?", sub.Id).Updates(updateMap).Error
+}
+
+func replacePrimarySubscriptionWithPlanTx(tx *gorm.DB, userId int, currentSub *UserSubscription, plan *SubscriptionPlan, source string, fixedEndTime int64) (*UserSubscription, error) {
+	if tx == nil || currentSub == nil || plan == nil {
+		return nil, errors.New("invalid upgrade args")
+	}
+	nowUnix := GetDBTimestamp()
+	resetBase := time.Unix(nowUnix, 0)
+	nextReset := calcNextResetTime(resetBase, plan, fixedEndTime)
+	lastReset := int64(0)
+	if nextReset > 0 {
+		lastReset = nowUnix
+	}
+	upgradeGroup := strings.TrimSpace(plan.UpgradeGroup)
+	prevGroup := ""
+	if upgradeGroup != "" {
+		currentGroup, err := getUserGroupByIdTx(tx, userId)
+		if err != nil {
+			return nil, err
+		}
+		if currentGroup != upgradeGroup {
+			prevGroup = currentGroup
+			if err := tx.Model(&User{}).Where("id = ?", userId).Update("group", upgradeGroup).Error; err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := tx.Model(&UserSubscription{}).Where("id = ?", currentSub.Id).Updates(map[string]interface{}{
+		"status":     "cancelled",
+		"end_time":   nowUnix,
+		"updated_at": common.GetTimestamp(),
+	}).Error; err != nil {
+		return nil, err
+	}
+	sub := &UserSubscription{
+		UserId:        userId,
+		PlanId:        plan.Id,
+		AmountTotal:   plan.TotalAmount,
+		AmountUsed:    0,
+		StartTime:     nowUnix,
+		EndTime:       fixedEndTime,
+		Status:        "active",
+		Source:        source,
+		LastResetTime: lastReset,
+		NextResetTime: nextReset,
+		UpgradeGroup:  upgradeGroup,
+		PrevUserGroup: prevGroup,
+		CreatedAt:     common.GetTimestamp(),
+		UpdatedAt:     common.GetTimestamp(),
+	}
+	if err := tx.Create(sub).Error; err != nil {
+		return nil, err
+	}
+	return sub, nil
+}
+
 // Complete a subscription order (idempotent). Creates a UserSubscription snapshot from the plan.
 func CompleteSubscriptionOrder(tradeNo string, providerPayload string) error {
 	if tradeNo == "" {
@@ -548,9 +815,30 @@ func CompleteSubscriptionOrder(tradeNo string, providerPayload string) error {
 			// still allow completion for already purchased orders
 		}
 		upgradeGroup = strings.TrimSpace(plan.UpgradeGroup)
-		_, err = CreateUserSubscriptionFromPlanTx(tx, order.UserId, plan, "order")
-		if err != nil {
-			return err
+		purchaseCtx, hasPurchaseCtx := decodeSubscriptionPurchaseContext(order.ProviderPayload)
+		switch {
+		case hasPurchaseCtx && purchaseCtx.Mode == SubscriptionPurchaseModeRenew && purchaseCtx.CurrentSubscriptionId > 0:
+			var currentSub UserSubscription
+			if err := tx.Set("gorm:query_option", "FOR UPDATE").Where("id = ? AND user_id = ?", purchaseCtx.CurrentSubscriptionId, order.UserId).First(&currentSub).Error; err != nil {
+				return err
+			}
+			if err := extendSubscriptionFromPlanTx(tx, &currentSub, plan); err != nil {
+				return err
+			}
+		case hasPurchaseCtx && purchaseCtx.Mode == SubscriptionPurchaseModeUpgrade && purchaseCtx.CurrentSubscriptionId > 0 && purchaseCtx.CurrentEndTime > 0:
+			var currentSub UserSubscription
+			if err := tx.Set("gorm:query_option", "FOR UPDATE").Where("id = ? AND user_id = ?", purchaseCtx.CurrentSubscriptionId, order.UserId).First(&currentSub).Error; err != nil {
+				return err
+			}
+			_, err = replacePrimarySubscriptionWithPlanTx(tx, order.UserId, &currentSub, plan, "order", purchaseCtx.CurrentEndTime)
+			if err != nil {
+				return err
+			}
+		default:
+			_, err = CreateUserSubscriptionFromPlanTx(tx, order.UserId, plan, "order")
+			if err != nil {
+				return err
+			}
 		}
 		if err := upsertSubscriptionTopUpTx(tx, &order); err != nil {
 			return err

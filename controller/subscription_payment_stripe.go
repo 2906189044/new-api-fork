@@ -15,6 +15,7 @@ import (
 	"github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/checkout/session"
 	"github.com/thanhpk/randstr"
+	"gorm.io/gorm"
 )
 
 type SubscriptionStripePayRequest struct {
@@ -35,6 +36,10 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 	}
 	if !plan.Enabled {
 		common.ApiErrorMsg(c, "套餐未启用")
+		return
+	}
+	if !plan.VisibleToUser || plan.StackableBonus {
+		common.ApiErrorMsg(c, "该套餐不可直接购买")
 		return
 	}
 	if plan.StripePriceId == "" {
@@ -61,39 +66,33 @@ func SubscriptionRequestStripePay(c *gin.Context) {
 		return
 	}
 
-	if plan.MaxPurchasePerUser > 0 {
-		count, err := model.CountUserSubscriptionsByPlan(userId, plan.Id)
-		if err != nil {
-			common.ApiError(c, err)
-			return
-		}
-		if count >= int64(plan.MaxPurchasePerUser) {
-			common.ApiErrorMsg(c, "已达到该套餐购买上限")
-			return
-		}
-	}
-
 	reference := fmt.Sprintf("sub-stripe-ref-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(4))
 	referenceId := "sub_ref_" + common.Sha1([]byte(reference))
+
+	var chargeCtx *model.SubscriptionPurchaseContext
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
+		_, ctx, err := model.CreateSubscriptionOrderTx(tx, userId, plan, PaymentMethodStripe, referenceId, time.Now().Unix())
+		if err != nil {
+			return err
+		}
+		chargeCtx = ctx
+		return nil
+	})
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if chargeCtx != nil && chargeCtx.ChargeAmount != plan.PriceAmount {
+		_ = model.ExpireSubscriptionOrder(referenceId)
+		common.ApiErrorMsg(c, "当前支付方式暂不支持套餐差价升级")
+		return
+	}
 
 	payLink, err := genStripeSubscriptionLink(referenceId, user.StripeCustomer, user.Email, plan.StripePriceId)
 	if err != nil {
 		log.Println("获取Stripe Checkout支付链接失败", err)
+		_ = model.ExpireSubscriptionOrder(referenceId)
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "拉起支付失败"})
-		return
-	}
-
-	order := &model.SubscriptionOrder{
-		UserId:        userId,
-		PlanId:        plan.Id,
-		Money:         plan.PriceAmount,
-		TradeNo:       referenceId,
-		PaymentMethod: PaymentMethodStripe,
-		CreateTime:    time.Now().Unix(),
-		Status:        common.TopUpStatusPending,
-	}
-	if err := order.Insert(); err != nil {
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
 		return
 	}
 
