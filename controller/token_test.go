@@ -273,3 +273,36 @@ func TestGetTokenKeyRequiresOwnershipAndReturnsFullKey(t *testing.T) {
 		t.Fatalf("unauthorized key response leaked raw token key: %s", unauthorizedRecorder.Body.String())
 	}
 }
+
+func TestAddTokenForcesAutoGroup(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+	body := map[string]any{
+		"name":                 "auto-token",
+		"expired_time":         -1,
+		"remain_quota":         0,
+		"unlimited_quota":      true,
+		"model_limits_enabled": false,
+		"model_limits":         "",
+		"group":                "default",
+		"cross_group_retry":    true,
+	}
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/token/", body, 1)
+	AddToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	if !response.Success {
+		t.Fatalf("expected success response, got message: %s", response.Message)
+	}
+
+	var token model.Token
+	if err := db.Where("user_id = ? AND name = ?", 1, "auto-token").First(&token).Error; err != nil {
+		t.Fatalf("failed to load token: %v", err)
+	}
+	if token.Group != "auto" {
+		t.Fatalf("expected token group auto, got %q", token.Group)
+	}
+	if token.CrossGroupRetry {
+		t.Fatalf("expected cross_group_retry to be disabled for auto tokens")
+	}
+}

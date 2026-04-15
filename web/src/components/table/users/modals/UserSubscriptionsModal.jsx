@@ -81,6 +81,7 @@ const UserSubscriptionsModal = ({ visible, onCancel, user, t, onSuccess }) => {
 
   const [plans, setPlans] = useState([]);
   const [selectedPlanId, setSelectedPlanId] = useState(null);
+  const [claimedPlanIds, setClaimedPlanIds] = useState([]);
 
   const [subs, setSubs] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
@@ -112,6 +113,15 @@ const UserSubscriptionsModal = ({ visible, onCancel, user, t, onSuccess }) => {
     }));
   }, [plans]);
 
+  const selectedPlan = useMemo(() => {
+    return (plans || []).find((item) => item?.plan?.id === selectedPlanId)?.plan;
+  }, [plans, selectedPlanId]);
+
+  const selectedPlanAlreadyClaimed = useMemo(() => {
+    if (!selectedPlanId) return false;
+    return (claimedPlanIds || []).includes(selectedPlanId);
+  }, [claimedPlanIds, selectedPlanId]);
+
   const loadPlans = async () => {
     setPlansLoading(true);
     try {
@@ -136,8 +146,15 @@ const UserSubscriptionsModal = ({ visible, onCancel, user, t, onSuccess }) => {
         `/api/subscription/admin/users/${user.id}/subscriptions`,
       );
       if (res.data?.success) {
-        const next = res.data.data || [];
+        const payload = res.data.data;
+        const next = Array.isArray(payload)
+          ? payload
+          : payload?.subscriptions || [];
+        const claimed = Array.isArray(payload?.claimed_plan_ids)
+          ? payload.claimed_plan_ids
+          : [];
         setSubs(next);
+        setClaimedPlanIds(claimed);
         setCurrentPage(1);
       } else {
         showError(res.data?.message || t('加载失败'));
@@ -168,6 +185,10 @@ const UserSubscriptionsModal = ({ visible, onCancel, user, t, onSuccess }) => {
     }
     if (!selectedPlanId) {
       showError(t('请选择订阅套餐'));
+      return;
+    }
+    if (selectedPlanAlreadyClaimed) {
+      showError(t('该用户历史已领取过该一次性福利套餐，不能再次开通'));
       return;
     }
     setCreating(true);
@@ -388,12 +409,19 @@ const UserSubscriptionsModal = ({ visible, onCancel, user, t, onSuccess }) => {
               theme='solid'
               icon={<IconPlusCircle />}
               loading={creating}
+              disabled={selectedPlanAlreadyClaimed}
               onClick={createSubscription}
             >
               {t('新增订阅')}
             </Button>
           </div>
         </div>
+
+        {selectedPlan?.stackable_bonus && selectedPlanAlreadyClaimed ? (
+          <div className='mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700'>
+            {t('该福利套餐仅面向新用户发放，当前用户历史已领取过，不能再次开通。')}
+          </div>
+        ) : null}
 
         {/* 订阅列表 */}
         <CardTable

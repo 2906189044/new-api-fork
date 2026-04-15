@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Button,
@@ -31,15 +31,29 @@ import {
   Typography,
 } from '@douyinfe/semi-ui';
 import { API, showError, showSuccess, renderQuota } from '../../helpers';
-import { getCurrencyConfig } from '../../helpers/render';
 import { RefreshCw, Sparkles } from 'lucide-react';
 import SubscriptionPurchaseModal from './modals/SubscriptionPurchaseModal';
 import {
   formatSubscriptionDuration,
   formatSubscriptionResetPeriod,
+  formatSubscriptionPrice,
+  getSubscriptionBenefitSlots,
+  getSubscriptionCardLayoutConfig,
+  getSubscriptionDisplayConfig,
+  getSubscriptionFeatureSlots,
+  getSubscriptionQuotaLabel,
+  getSubscriptionSummaryQuotaHint,
+  getSubscriptionSummaryQuotaLabel,
+  resolveSubscriptionDisplaySubtitle,
+  resolveSubscriptionDisplayTitle,
+  shouldClampSubscriptionCopy,
 } from '../../helpers/subscriptionFormat';
 
 const { Text } = Typography;
+
+function getFeatureIconClass(isFeatured) {
+  return isFeatured ? 'text-violet-600' : 'text-slate-500';
+}
 
 // 过滤易支付方式
 function getEpayMethods(payMethods = []) {
@@ -89,8 +103,20 @@ const SubscriptionPlansCard = ({
   const [paying, setPaying] = useState(false);
   const [selectedEpayMethod, setSelectedEpayMethod] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [isMobileLayout, setIsMobileLayout] = useState(false);
 
   const epayMethods = useMemo(() => getEpayMethods(payMethods), [payMethods]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined;
+    const mediaQuery = window.matchMedia('(max-width: 767px)');
+    const syncMobileLayout = (event) => {
+      setIsMobileLayout(event.matches);
+    };
+    syncMobileLayout(mediaQuery);
+    mediaQuery.addEventListener('change', syncMobileLayout);
+    return () => mediaQuery.removeEventListener('change', syncMobileLayout);
+  }, []);
 
   const openBuy = (p) => {
     setSelectedPlan(p);
@@ -228,6 +254,16 @@ const SubscriptionPlansCard = ({
       const plan = p?.plan;
       if (!plan?.id) return;
       map.set(plan.id, plan.title || '');
+    });
+    return map;
+  }, [plans]);
+
+  const planMap = useMemo(() => {
+    const map = new Map();
+    (plans || []).forEach((p) => {
+      const plan = p?.plan;
+      if (!plan?.id) return;
+      map.set(plan.id, plan);
     });
     return map;
   }, [plans]);
@@ -389,6 +425,12 @@ const SubscriptionPlansCard = ({
                         : 0;
                     const planTitle =
                       planTitleMap.get(subscription?.plan_id) || '';
+                    const plan = planMap.get(subscription?.plan_id);
+                    const quotaLabel = getSubscriptionSummaryQuotaLabel(
+                      plan,
+                      t,
+                    );
+                    const quotaHint = getSubscriptionSummaryQuotaHint(plan, t);
                     const remainDays = getRemainingDays(sub);
                     const usagePercent = getUsagePercent(sub);
                     const now = Date.now() / 1000;
@@ -442,16 +484,8 @@ const SubscriptionPlansCard = ({
                             (subscription?.end_time || 0) * 1000,
                           ).toLocaleString()}
                         </div>
-                        {isActive && subscription?.next_reset_time > 0 && (
-                          <div className='text-xs text-gray-500 mb-2'>
-                            {t('下一次重置')}:{' '}
-                            {new Date(
-                              subscription.next_reset_time * 1000,
-                            ).toLocaleString()}
-                          </div>
-                        )}
                         <div className='text-xs text-gray-500 mb-2'>
-                          {t('总额度')}:{' '}
+                          {quotaLabel}:{' '}
                           {totalAmount > 0 ? (
                             <Tooltip
                               content={`${t('原生额度')}：${usedAmount}/${totalAmount} · ${t('剩余')} ${remainAmount}`}
@@ -471,6 +505,11 @@ const SubscriptionPlansCard = ({
                             </span>
                           )}
                         </div>
+                        {quotaHint ? (
+                          <div className='text-xs text-gray-400 mb-2'>
+                            {quotaHint}
+                          </div>
+                        ) : null}
                         {!isLast && <Divider margin={12} />}
                       </div>
                     );
@@ -486,23 +525,30 @@ const SubscriptionPlansCard = ({
 
           {/* 可购买套餐 - 标准定价卡片 */}
           {plans.length > 0 ? (
-            <div className='grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-5 w-full px-1'>
+            <div className='grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 w-full px-1'>
               {plans.map((p, index) => {
                 const plan = p?.plan;
+                const displayConfig = getSubscriptionDisplayConfig(plan);
                 const totalAmount = Number(plan?.total_amount || 0);
-                const { symbol, rate } = getCurrencyConfig();
-                const price = Number(plan?.price_amount || 0);
-                const convertedPrice = price * rate;
-                const displayPrice = convertedPrice.toFixed(
-                  Number.isInteger(convertedPrice) ? 0 : 2,
-                );
-                const isPopular = index === 0 && plans.length > 1;
+                const displayPrice = formatSubscriptionPrice(plan);
+                const isPopular =
+                  displayConfig.is_featured === true ||
+                  (index === 0 && plans.length > 1);
                 const limit = Number(plan?.max_purchase_per_user || 0);
                 const limitLabel = limit > 0 ? `${t('限购')} ${limit}` : null;
+                const quotaLabel = getSubscriptionQuotaLabel(plan, t);
+                const displayTitle = resolveSubscriptionDisplayTitle(
+                  plan,
+                  displayConfig,
+                );
+                const displaySubtitle = resolveSubscriptionDisplaySubtitle(
+                  plan,
+                  displayConfig,
+                );
                 const totalLabel =
                   totalAmount > 0
-                    ? `${t('总额度')}: ${renderQuota(totalAmount)}`
-                    : `${t('总额度')}: ${t('不限')}`;
+                    ? `${displayConfig.quota_caption || quotaLabel}: ${renderQuota(totalAmount)}`
+                    : `${displayConfig.quota_caption || quotaLabel}: ${t('不限')}`;
                 const upgradeLabel = plan?.upgrade_group
                   ? `${t('升级分组')}: ${plan.upgrade_group}`
                   : null;
@@ -524,91 +570,231 @@ const SubscriptionPlansCard = ({
                   limitLabel ? { label: limitLabel } : null,
                   upgradeLabel ? { label: upgradeLabel } : null,
                 ].filter(Boolean);
+                const featurePoints =
+                  displayConfig.feature_points?.length > 0
+                    ? displayConfig.feature_points
+                    : planBenefits.map((item) => item.label);
+                const featureSlots = getSubscriptionFeatureSlots(
+                  featurePoints,
+                  5,
+                );
+                const benefitSlots = getSubscriptionBenefitSlots(
+                  planBenefits,
+                  4,
+                );
+                const cardLayout = getSubscriptionCardLayoutConfig();
+                const buttonText = displayConfig.cta_text || t('立即订阅');
+                const eyebrow = displayConfig.eyebrow || '';
+                const highlightTag = displayConfig.highlight_tag || '';
+                const priceCaption =
+                  displayConfig.price_caption ||
+                  `${t('有效期')} · ${formatSubscriptionDuration(plan, t)}`;
+                const notes = plan?.display_notes || '';
+                const isDarkTheme = displayConfig.theme === 'dark';
+                const cardToneClass = isDarkTheme
+                  ? 'bg-slate-950 text-white border-slate-900 shadow-[0_20px_60px_rgba(15,23,42,0.22)]'
+                  : isPopular
+                    ? 'bg-violet-50/90 border-violet-300 shadow-[0_20px_60px_rgba(99,102,241,0.18)]'
+                    : 'bg-white border-slate-200 shadow-[0_20px_50px_rgba(15,23,42,0.08)]';
+                const subtitleClass = isDarkTheme
+                  ? 'text-slate-300'
+                  : 'text-slate-500';
+                const priceClass = isDarkTheme
+                  ? 'text-white'
+                  : isPopular
+                    ? 'text-violet-700'
+                    : 'text-slate-900';
+                const dividerClass = isDarkTheme
+                  ? 'border-slate-800'
+                  : 'border-slate-100';
+                const buttonTheme =
+                  isPopular || isDarkTheme ? 'solid' : 'outline';
+                const buttonType = isDarkTheme ? 'secondary' : 'primary';
+                const clampCopy = shouldClampSubscriptionCopy(isMobileLayout);
 
                 return (
                   <Card
                     key={plan?.id}
-                    className={`!rounded-xl transition-all hover:shadow-lg w-full h-full ${
-                      isPopular ? 'ring-2 ring-purple-500' : ''
-                    }`}
+                    className={`!rounded-[28px] border transition-all duration-200 hover:-translate-y-1 w-full h-full overflow-hidden ${cardToneClass}`}
                     bodyStyle={{ padding: 0 }}
                   >
-                    <div className='p-4 h-full flex flex-col'>
-                      {/* 推荐标签 */}
-                      {isPopular && (
-                        <div className='mb-2'>
-                          <Tag color='purple' shape='circle' size='small'>
-                            <Sparkles size={10} className='mr-1' />
-                            {t('推荐')}
-                          </Tag>
+                    <div
+                      className={`${cardLayout.cardPadding} ${cardLayout.cardMinHeight} h-full flex flex-col`}
+                    >
+                      <div
+                        className={`flex items-start justify-between gap-3 mb-3.5 ${cardLayout.headerMinHeight}`}
+                      >
+                        <div className='min-w-0 flex-1 flex flex-col justify-start'>
+                          <div className={cardLayout.eyebrowSlotHeight}>
+                            {eyebrow && (
+                              <div
+                                className={`text-[11px] uppercase tracking-[0.22em] font-semibold mb-1 ${
+                                  isDarkTheme
+                                    ? 'text-slate-400'
+                                    : 'text-violet-500'
+                                }`}
+                              >
+                                {eyebrow}
+                              </div>
+                            )}
+                          </div>
+                          <div className='pt-1'>
+                            <div
+                              className='sr-only'
+                            >
+                            </div>
+                            <Typography.Title
+                              heading={4}
+                              ellipsis={{ rows: 2, showTooltip: true }}
+                              style={{ margin: 0, minHeight: 48 }}
+                            >
+                              {displayTitle || t('订阅套餐')}
+                            </Typography.Title>
+                          </div>
                         </div>
-                      )}
-                      {/* 套餐名称 */}
-                      <div className='mb-3'>
-                        <Typography.Title
-                          heading={5}
-                          ellipsis={{ rows: 1, showTooltip: true }}
-                          style={{ margin: 0 }}
-                        >
-                          {plan?.title || t('订阅套餐')}
-                        </Typography.Title>
-                        {plan?.subtitle && (
-                          <Text
-                            type='tertiary'
+                        {(highlightTag || isPopular) && (
+                          <Tag
+                            color={isDarkTheme ? 'grey' : 'purple'}
+                            shape='circle'
                             size='small'
-                            ellipsis={{ rows: 1, showTooltip: true }}
-                            style={{ display: 'block' }}
                           >
-                            {plan.subtitle}
-                          </Text>
+                            <Sparkles size={10} className='mr-1' />
+                            {highlightTag || t('推荐')}
+                          </Tag>
                         )}
                       </div>
 
-                      {/* 价格区域 */}
-                      <div className='py-2'>
-                        <div className='flex items-baseline justify-start'>
-                          <span className='text-xl font-bold text-purple-600'>
-                            {symbol}
-                          </span>
-                          <span className='text-3xl font-bold text-purple-600'>
+                      {displaySubtitle && (
+                        <Text
+                          className={subtitleClass}
+                          style={{
+                            whiteSpace: 'pre-line',
+                            ...(clampCopy
+                              ? {
+                                  display: '-webkit-box',
+                                  overflow: 'hidden',
+                                  WebkitLineClamp: 5,
+                                  WebkitBoxOrient: 'vertical',
+                                  minHeight: cardLayout.subtitleMinHeight,
+                                }
+                              : {}),
+                          }}
+                        >
+                          {displaySubtitle}
+                        </Text>
+                      )}
+
+                      <div className='mt-4 mb-3.5'>
+                        <div className='flex items-end gap-2 flex-wrap'>
+                          <span
+                            className={`text-4xl font-semibold tracking-tight break-all ${priceClass}`}
+                          >
                             {displayPrice}
                           </span>
                         </div>
+                        <div className={`text-sm mt-2 ${subtitleClass}`}>
+                          {priceCaption}
+                        </div>
                       </div>
 
-                      {/* 套餐权益描述 */}
-                      <div className='flex flex-col items-start gap-1 pb-2'>
-                        {planBenefits.map((item) => {
-                          const content = (
-                            <div className='flex items-center gap-2 text-xs text-gray-500'>
-                              <Badge dot type='tertiary' />
-                              <span>{item.label}</span>
-                            </div>
-                          );
-                          if (!item.tooltip) {
-                            return (
+                      <div className={`space-y-2 ${cardLayout.featureBlockMinHeight}`}>
+                        {featureSlots.map((point, featureIndex) => (
+                          <div
+                            key={`${plan?.id}-${featureIndex}`}
+                            className='flex items-start gap-3'
+                          >
+                            {point ? (
+                              <>
+                                <div
+                                  className={`mt-1 inline-flex h-5 w-5 items-center justify-center rounded-full border ${
+                                    isDarkTheme
+                                      ? 'border-slate-700 bg-slate-900'
+                                      : isPopular
+                                        ? 'border-violet-200 bg-white/90'
+                                        : 'border-slate-200 bg-slate-50'
+                                  }`}
+                                >
+                                  <Badge dot type='primary' />
+                                </div>
+                                <span
+                                  className={`text-sm leading-6 ${isDarkTheme ? 'text-slate-200' : 'text-slate-700'}`}
+                                >
+                                  {point}
+                                </span>
+                              </>
+                            ) : (
+                              <div className='h-5 w-full' aria-hidden='true' />
+                            )}
+                          </div>
+                        ))}
+                      </div>
+
+                      <div
+                        className={`mt-4 rounded-2xl border p-3.5 ${cardLayout.benefitBlockMinHeight} ${isDarkTheme ? 'border-slate-800 bg-slate-900/60' : 'border-slate-100 bg-slate-50/80'}`}
+                      >
+                        <div
+                          className={`text-xs uppercase tracking-[0.18em] mb-2 ${subtitleClass}`}
+                        >
+                          {t('套餐权益')}
+                        </div>
+                        <div className='space-y-2'>
+                          {benefitSlots.map((item, benefitIndex) => {
+                            if (!item) {
+                              return (
+                                <div
+                                  key={`${plan?.id}-benefit-empty-${benefitIndex}`}
+                                  className='h-4'
+                                  aria-hidden='true'
+                                />
+                              );
+                            }
+                            const content = (
                               <div
-                                key={item.label}
-                                className='w-full flex justify-start'
+                                className={`flex items-center gap-2 text-xs ${isDarkTheme ? 'text-slate-300' : 'text-slate-500'}`}
                               >
-                                {content}
+                                <Sparkles
+                                  size={12}
+                                  className={getFeatureIconClass(isPopular)}
+                                />
+                                <span>{item.label}</span>
                               </div>
                             );
-                          }
-                          return (
-                            <Tooltip key={item.label} content={item.tooltip}>
-                              <div className='w-full flex justify-start'>
-                                {content}
-                              </div>
-                            </Tooltip>
-                          );
-                        })}
+                            if (!item.tooltip) {
+                              return <div key={item.label}>{content}</div>;
+                            }
+                            return (
+                              <Tooltip key={item.label} content={item.tooltip}>
+                                <div>{content}</div>
+                              </Tooltip>
+                            );
+                          })}
+                        </div>
                       </div>
 
-                      <div className='mt-auto'>
-                        <Divider margin={12} />
+                      {notes && (
+                        <div
+                          className={`mt-3.5 text-sm leading-6 ${
+                            isDarkTheme ? 'text-slate-300' : 'text-slate-500'
+                          }`}
+                          style={{
+                            whiteSpace: 'pre-line',
+                            ...(clampCopy
+                              ? {
+                                  display: '-webkit-box',
+                                  overflow: 'hidden',
+                                  WebkitLineClamp: 5,
+                                  WebkitBoxOrient: 'vertical',
+                                }
+                              : {}),
+                          }}
+                        >
+                          {notes}
+                        </div>
+                      )}
 
-                        {/* 购买按钮 */}
+                      <div className={`mt-auto ${cardLayout.ctaPaddingTop}`}>
+                        <Divider margin={12} className={dividerClass} />
+
                         {(() => {
                           const count = getPlanPurchaseCount(p?.plan?.id);
                           const reached = limit > 0 && count >= limit;
@@ -617,15 +803,17 @@ const SubscriptionPlansCard = ({
                             : '';
                           const buttonEl = (
                             <Button
-                              theme='outline'
-                              type='primary'
+                              theme={buttonTheme}
+                              type={buttonType}
                               block
+                              size='large'
                               disabled={reached}
                               onClick={() => {
                                 if (!reached) openBuy(p);
                               }}
+                              className='!rounded-xl !h-11'
                             >
-                              {reached ? t('已达上限') : t('立即订阅')}
+                              {reached ? t('已达上限') : buttonText}
                             </Button>
                           );
                           return reached ? (

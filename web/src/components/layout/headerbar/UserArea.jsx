@@ -98,7 +98,7 @@ const UserArea = ({
                     size='small'
                     className='text-gray-500 dark:text-gray-400'
                   />
-                  <span>{t('钱包管理')}</span>
+                  <span>{t('套餐与充值')}</span>
                 </div>
               </Dropdown.Item>
               <Dropdown.Item

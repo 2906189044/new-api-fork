@@ -3,12 +3,20 @@ package service
 import (
 	"strings"
 
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
 func GetUserUsableGroups(userGroup string) map[string]string {
+	return getUserUsableGroupsBase(userGroup)
+}
+
+func getUserUsableGroupsBase(userGroup string) map[string]string {
 	groupsCopy := setting.GetUserUsableGroupsCopy()
+	if setting.DefaultUseAutoGroup {
+		groupsCopy["auto"] = setting.GetUsableGroupDescription("auto")
+	}
 	if userGroup != "" {
 		specialSettings, b := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup.Get(userGroup)
 		if b {
@@ -36,14 +44,63 @@ func GetUserUsableGroups(userGroup string) map[string]string {
 	return groupsCopy
 }
 
+func bonusScopeUsableGroups(scope string) []string {
+	switch strings.TrimSpace(scope) {
+	case "gpt_series":
+		return []string{"gpt_core", "gpt52_unlimited"}
+	default:
+		return []string{}
+	}
+}
+
+func GetUserUsableGroupsForUser(userId int, userGroup string) map[string]string {
+	groupsCopy := getUserUsableGroupsBase(userGroup)
+	if userId <= 0 {
+		return groupsCopy
+	}
+	scopes, err := model.GetActiveStackableBonusScopes(userId)
+	if err != nil {
+		return groupsCopy
+	}
+	for _, scope := range scopes {
+		for _, group := range bonusScopeUsableGroups(scope) {
+			if _, ok := groupsCopy[group]; ok {
+				continue
+			}
+			desc := setting.GetUsableGroupDescription(group)
+			if strings.TrimSpace(desc) == "" {
+				desc = "附加订阅权益"
+			}
+			groupsCopy[group] = desc
+		}
+	}
+	return groupsCopy
+}
+
 func GroupInUserUsableGroups(userGroup, groupName string) bool {
 	_, ok := GetUserUsableGroups(userGroup)[groupName]
+	return ok
+}
+
+func GroupInUserUsableGroupsForUser(userId int, userGroup, groupName string) bool {
+	_, ok := GetUserUsableGroupsForUser(userId, userGroup)[groupName]
 	return ok
 }
 
 // GetUserAutoGroup 根据用户分组获取自动分组设置
 func GetUserAutoGroup(userGroup string) []string {
 	groups := GetUserUsableGroups(userGroup)
+	autoGroups := make([]string, 0)
+	for _, group := range setting.GetAutoGroups() {
+		if _, ok := groups[group]; ok {
+			autoGroups = append(autoGroups, group)
+		}
+	}
+	return autoGroups
+}
+
+func GetUserAutoGroupForUser(userId int, userGroup string) []string {
+	groups := GetUserUsableGroupsForUser(userId, userGroup)
 	autoGroups := make([]string, 0)
 	for _, group := range setting.GetAutoGroups() {
 		if _, ok := groups[group]; ok {

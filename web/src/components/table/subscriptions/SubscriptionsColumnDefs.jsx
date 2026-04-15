@@ -30,7 +30,13 @@ import {
   Tooltip,
 } from '@douyinfe/semi-ui';
 import { renderQuota } from '../../../helpers';
-import { convertUSDToCurrency } from '../../../helpers/render';
+import {
+  formatSubscriptionPrice,
+  getSubscriptionDisplayConfig,
+  getSubscriptionQuotaLabel,
+  resolveSubscriptionDisplaySubtitle,
+  resolveSubscriptionDisplayTitle,
+} from '../../../helpers/subscriptionFormat';
 
 const { Text } = Typography;
 
@@ -65,13 +71,18 @@ function formatResetPeriod(plan, t) {
 }
 
 const renderPlanTitle = (text, record, t) => {
-  const subtitle = record?.plan?.subtitle;
   const plan = record?.plan;
+  const displayConfig = getSubscriptionDisplayConfig(plan);
+  const title = resolveSubscriptionDisplayTitle(plan, displayConfig) || text;
+  const subtitle = resolveSubscriptionDisplaySubtitle(plan, displayConfig);
   const popoverContent = (
     <div style={{ width: 260 }}>
-      <Text strong>{text}</Text>
+      <Text strong>{title}</Text>
       {subtitle && (
-        <Text type='tertiary' style={{ display: 'block', marginTop: 4 }}>
+        <Text
+          type='tertiary'
+          style={{ display: 'block', marginTop: 4, whiteSpace: 'pre-line' }}
+        >
           {subtitle}
         </Text>
       )}
@@ -79,9 +90,9 @@ const renderPlanTitle = (text, record, t) => {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
         <Text type='tertiary'>{t('价格')}</Text>
         <Text strong style={{ color: 'var(--semi-color-success)' }}>
-          {convertUSDToCurrency(Number(plan?.price_amount || 0), 2)}
+          {formatSubscriptionPrice(plan)}
         </Text>
-        <Text type='tertiary'>{t('总额度')}</Text>
+        <Text type='tertiary'>{getSubscriptionQuotaLabel(plan, t)}</Text>
         {plan?.total_amount > 0 ? (
           <Tooltip content={`${t('原生额度')}：${plan.total_amount}`}>
             <Text>{renderQuota(plan.total_amount)}</Text>
@@ -109,13 +120,18 @@ const renderPlanTitle = (text, record, t) => {
     <Popover content={popoverContent} position='rightTop' showArrow>
       <div style={{ cursor: 'pointer', maxWidth: 180 }}>
         <Text strong ellipsis={{ showTooltip: false }}>
-          {text}
+          {title}
         </Text>
         {subtitle && (
           <Text
             type='tertiary'
-            ellipsis={{ showTooltip: false }}
-            style={{ display: 'block' }}
+            style={{
+              display: '-webkit-box',
+              overflow: 'hidden',
+              whiteSpace: 'pre-line',
+              WebkitLineClamp: 5,
+              WebkitBoxOrient: 'vertical',
+            }}
           >
             {subtitle}
           </Text>
@@ -125,10 +141,10 @@ const renderPlanTitle = (text, record, t) => {
   );
 };
 
-const renderPrice = (text) => {
+const renderPrice = (text, record) => {
   return (
     <Text strong style={{ color: 'var(--semi-color-success)' }}>
-      {convertUSDToCurrency(Number(text || 0), 2)}
+      {formatSubscriptionPrice(record?.plan)}
     </Text>
   );
 };

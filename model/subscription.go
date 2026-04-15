@@ -146,17 +146,21 @@ type SubscriptionPlan struct {
 	Id int `json:"id"`
 
 	Title    string `json:"title" gorm:"type:varchar(128);not null"`
-	Subtitle string `json:"subtitle" gorm:"type:varchar(255);default:''"`
+	Subtitle string `json:"subtitle" gorm:"type:text;default:''"`
+
+	DisplayConfig string `json:"display_config" gorm:"type:text;default:''"`
+	DisplayNotes  string `json:"display_notes" gorm:"type:text;default:''"`
 
 	// Display money amount (follow existing code style: float64 for money)
 	PriceAmount float64 `json:"price_amount" gorm:"type:decimal(10,6);not null;default:0"`
-	Currency    string  `json:"currency" gorm:"type:varchar(8);not null;default:'USD'"`
+	Currency    string  `json:"currency" gorm:"type:varchar(8);not null;default:'CNY'"`
 
 	DurationUnit  string `json:"duration_unit" gorm:"type:varchar(16);not null;default:'month'"`
 	DurationValue int    `json:"duration_value" gorm:"type:int;not null;default:1"`
 	CustomSeconds int64  `json:"custom_seconds" gorm:"type:bigint;not null;default:0"`
 
 	Enabled   bool `json:"enabled" gorm:"default:true"`
+	VisibleToUser bool `json:"visible_to_user" gorm:"default:true"`
 	SortOrder int  `json:"sort_order" gorm:"type:int;default:0"`
 
 	StripePriceId  string `json:"stripe_price_id" gorm:"type:varchar(128);default:''"`
@@ -167,6 +171,10 @@ type SubscriptionPlan struct {
 
 	// Upgrade user group after purchase (empty = no change)
 	UpgradeGroup string `json:"upgrade_group" gorm:"type:varchar(64);default:''"`
+
+	// Stackable bonus plans do not override the user's primary group.
+	StackableBonus bool   `json:"stackable_bonus" gorm:"default:false"`
+	BonusModelScope string `json:"bonus_model_scope" gorm:"type:varchar(32);default:''"`
 
 	// Total quota (amount in quota units, 0 = unlimited)
 	TotalAmount int64 `json:"total_amount" gorm:"type:bigint;not null;default:0"`
@@ -468,6 +476,9 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 		lastReset = now.Unix()
 	}
 	upgradeGroup := strings.TrimSpace(plan.UpgradeGroup)
+	if plan.StackableBonus {
+		upgradeGroup = ""
+	}
 	prevGroup := ""
 	if upgradeGroup != "" {
 		currentGroup, err := getUserGroupByIdTx(tx, userId)
@@ -636,7 +647,21 @@ func AdminBindSubscription(userId int, planId int, sourceNote string) (string, e
 	if err != nil {
 		return "", err
 	}
+	if plan.StackableBonus {
+		claimed, err := HasUserClaimedSubscriptionPlan(userId, planId)
+		if err != nil {
+			return "", err
+		}
+		if claimed {
+			return "", errors.New("该用户历史已领取过该一次性福利套餐，不能再次开通")
+		}
+	}
 	err = DB.Transaction(func(tx *gorm.DB) error {
+		if plan.StackableBonus {
+			if err := ensureSubscriptionPlanClaimTx(tx, userId, planId); err != nil {
+				return err
+			}
+		}
 		_, err := CreateUserSubscriptionFromPlanTx(tx, userId, plan, "admin")
 		return err
 	})
@@ -648,6 +673,103 @@ func AdminBindSubscription(userId int, planId int, sourceNote string) (string, e
 		return fmt.Sprintf("用户分组将升级到 %s", plan.UpgradeGroup), nil
 	}
 	return "", nil
+}
+
+type SubscriptionPlanClaim struct {
+	Id        int   `json:"id"`
+	UserId    int   `json:"user_id" gorm:"index;uniqueIndex:idx_user_plan_claim"`
+	PlanId    int   `json:"plan_id" gorm:"index;uniqueIndex:idx_user_plan_claim"`
+	CreatedAt int64 `json:"created_at" gorm:"bigint"`
+}
+
+func (c *SubscriptionPlanClaim) BeforeCreate(tx *gorm.DB) error {
+	if c.CreatedAt == 0 {
+		c.CreatedAt = common.GetTimestamp()
+	}
+	return nil
+}
+
+func HasUserClaimedSubscriptionPlan(userId int, planId int) (bool, error) {
+	if userId <= 0 || planId <= 0 {
+		return false, errors.New("invalid userId or planId")
+	}
+	var count int64
+	if err := DB.Model(&SubscriptionPlanClaim{}).
+		Where("user_id = ? AND plan_id = ?", userId, planId).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func GetUserClaimedSubscriptionPlanIDs(userId int) ([]int, error) {
+	if userId <= 0 {
+		return []int{}, errors.New("invalid userId")
+	}
+	planIds := make([]int, 0)
+	err := DB.Model(&SubscriptionPlanClaim{}).
+		Where("user_id = ?", userId).
+		Order("plan_id asc").
+		Pluck("plan_id", &planIds).Error
+	if err != nil {
+		return nil, err
+	}
+	return planIds, nil
+}
+
+func ensureSubscriptionPlanClaimTx(tx *gorm.DB, userId int, planId int) error {
+	if tx == nil {
+		return errors.New("tx is nil")
+	}
+	var count int64
+	if err := tx.Model(&SubscriptionPlanClaim{}).
+		Where("user_id = ? AND plan_id = ?", userId, planId).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return errors.New("该用户历史已领取过该一次性福利套餐，不能再次开通")
+	}
+	return tx.Create(&SubscriptionPlanClaim{
+		UserId: userId,
+		PlanId: planId,
+	}).Error
+}
+
+func GetActiveStackableBonusScopes(userId int) ([]string, error) {
+	if userId <= 0 {
+		return []string{}, errors.New("invalid userId")
+	}
+	type scopeRow struct {
+		BonusModelScope string `gorm:"column:bonus_model_scope"`
+	}
+	var rows []scopeRow
+	now := GetDBTimestamp()
+	err := DB.Table("user_subscriptions us").
+		Select("DISTINCT sp.bonus_model_scope").
+		Joins("JOIN subscription_plans sp ON sp.id = us.plan_id").
+		Where("us.user_id = ? AND us.status = ? AND us.end_time > ? AND sp.stackable_bonus = ? AND sp.bonus_model_scope <> ''",
+			userId, "active", now, true).
+		Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	scopes := make([]string, 0, len(rows))
+	for _, row := range rows {
+		scopes = append(scopes, strings.TrimSpace(row.BonusModelScope))
+	}
+	return scopes, nil
+}
+
+func bonusScopeMatchesModel(scope string, modelName string) bool {
+	scope = strings.TrimSpace(scope)
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	switch scope {
+	case "gpt_series":
+		return strings.HasPrefix(modelName, "gpt-")
+	default:
+		return false
+	}
 }
 
 // GetAllActiveUserSubscriptions returns all active subscriptions for a user.
@@ -999,7 +1121,8 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 		if len(subs) == 0 {
 			return errors.New("no active subscription")
 		}
-		for _, candidate := range subs {
+		prioritized := prioritizeSubscriptionsForModel(tx, subs, modelName, now)
+		for _, candidate := range prioritized {
 			sub := candidate
 			plan, err := getSubscriptionPlanByIdTx(tx, sub.PlanId)
 			if err != nil {
@@ -1007,6 +1130,9 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 			}
 			if err := maybeResetUserSubscriptionWithPlanTx(tx, &sub, plan, now); err != nil {
 				return err
+			}
+			if plan.StackableBonus && !bonusScopeMatchesModel(plan.BonusModelScope, modelName) {
+				continue
 			}
 			usedBefore := sub.AmountUsed
 			if sub.AmountTotal > 0 {
@@ -1054,6 +1180,27 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 		return nil, err
 	}
 	return returnValue, nil
+}
+
+func prioritizeSubscriptionsForModel(tx *gorm.DB, subs []UserSubscription, modelName string, now int64) []UserSubscription {
+	if len(subs) <= 1 {
+		return subs
+	}
+	matchingBonus := make([]UserSubscription, 0, len(subs))
+	others := make([]UserSubscription, 0, len(subs))
+	for _, sub := range subs {
+		plan, err := getSubscriptionPlanByIdTx(tx, sub.PlanId)
+		if err != nil {
+			others = append(others, sub)
+			continue
+		}
+		if plan.StackableBonus && bonusScopeMatchesModel(plan.BonusModelScope, modelName) {
+			matchingBonus = append(matchingBonus, sub)
+			continue
+		}
+		others = append(others, sub)
+	}
+	return append(matchingBonus, others...)
 }
 
 // RefundSubscriptionPreConsume is idempotent and refunds pre-consumed subscription quota by requestId.

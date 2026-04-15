@@ -187,14 +187,19 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 
 func ValidateUserToken(key string) (token *Token, err error) {
 	if key == "" {
-		return nil, ErrTokenNotProvided
+		return nil, errors.New("未提供令牌")
 	}
 	token, err = GetTokenByKey(key, false)
 	if err == nil {
-		if token.Status == common.TokenStatusExhausted ||
-			token.Status == common.TokenStatusExpired ||
-			token.Status != common.TokenStatusEnabled {
-			return token, ErrTokenInvalid
+		if token.Status == common.TokenStatusExhausted {
+			keyPrefix := key[:3]
+			keySuffix := key[len(key)-3:]
+			return token, errors.New("该令牌额度已用尽 TokenStatusExhausted[sk-" + keyPrefix + "***" + keySuffix + "]")
+		} else if token.Status == common.TokenStatusExpired {
+			return token, errors.New("该令牌已过期")
+		}
+		if token.Status != common.TokenStatusEnabled {
+			return token, errors.New("该令牌状态不可用")
 		}
 		if token.ExpiredTime != -1 && token.ExpiredTime < common.GetTimestamp() {
 			if !common.RedisEnabled {
@@ -204,25 +209,29 @@ func ValidateUserToken(key string) (token *Token, err error) {
 					common.SysLog("failed to update token status" + err.Error())
 				}
 			}
-			return token, ErrTokenInvalid
+			return token, errors.New("该令牌已过期")
 		}
 		if !token.UnlimitedQuota && token.RemainQuota <= 0 {
 			if !common.RedisEnabled {
+				// in this case, we can make sure the token is exhausted
 				token.Status = common.TokenStatusExhausted
 				err := token.SelectUpdate()
 				if err != nil {
 					common.SysLog("failed to update token status" + err.Error())
 				}
 			}
-			return token, ErrTokenInvalid
+			keyPrefix := key[:3]
+			keySuffix := key[len(key)-3:]
+			return token, fmt.Errorf("[sk-%s***%s] 该令牌额度已用尽 !token.UnlimitedQuota && token.RemainQuota = %d", keyPrefix, keySuffix, token.RemainQuota)
 		}
 		return token, nil
 	}
 	common.SysLog("ValidateUserToken: failed to get token: " + err.Error())
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, ErrTokenInvalid
+		return nil, errors.New("无效的令牌")
+	} else {
+		return nil, errors.New("无效的令牌，数据库查询出错，请联系管理员")
 	}
-	return nil, fmt.Errorf("%w: %v", ErrDatabase, err)
 }
 
 func GetTokenByIds(id int, userId int) (*Token, error) {

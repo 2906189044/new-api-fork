@@ -250,6 +250,7 @@ func InitLogDB() (err error) {
 func migrateDB() error {
 	// Migrate price_amount column from float/double to decimal for existing tables
 	migrateSubscriptionPlanPriceAmount()
+	migrateSubscriptionPlanCurrencyToCNY()
 	// Migrate model_limits column from varchar to text for existing tables
 	if err := migrateTokenModelLimitsToText(); err != nil {
 		return err
@@ -277,6 +278,7 @@ func migrateDB() error {
 		&Checkin{},
 		&SubscriptionOrder{},
 		&UserSubscription{},
+		&SubscriptionPlanClaim{},
 		&SubscriptionPreConsumeRecord{},
 		&CustomOAuthProvider{},
 		&UserOAuthBinding{},
@@ -297,6 +299,7 @@ func migrateDB() error {
 }
 
 func migrateDBFast() error {
+	migrateSubscriptionPlanCurrencyToCNY()
 
 	var wg sync.WaitGroup
 
@@ -325,6 +328,7 @@ func migrateDBFast() error {
 		{&Checkin{}, "Checkin"},
 		{&SubscriptionOrder{}, "SubscriptionOrder"},
 		{&UserSubscription{}, "UserSubscription"},
+		{&SubscriptionPlanClaim{}, "SubscriptionPlanClaim"},
 		{&SubscriptionPreConsumeRecord{}, "SubscriptionPreConsumeRecord"},
 		{&CustomOAuthProvider{}, "CustomOAuthProvider"},
 		{&UserOAuthBinding{}, "UserOAuthBinding"},
@@ -387,18 +391,23 @@ func ensureSubscriptionPlanTableSQLite() error {
 		createSQL := `CREATE TABLE ` + "`" + tableName + "`" + ` (
 ` + "`id`" + ` integer,
 ` + "`title`" + ` varchar(128) NOT NULL,
-` + "`subtitle`" + ` varchar(255) DEFAULT '',
+` + "`subtitle`" + ` text DEFAULT '',
+` + "`display_config`" + ` text DEFAULT '',
+` + "`display_notes`" + ` text DEFAULT '',
 ` + "`price_amount`" + ` decimal(10,6) NOT NULL,
-` + "`currency`" + ` varchar(8) NOT NULL DEFAULT 'USD',
+` + "`currency`" + ` varchar(8) NOT NULL DEFAULT 'CNY',
 ` + "`duration_unit`" + ` varchar(16) NOT NULL DEFAULT 'month',
 ` + "`duration_value`" + ` integer NOT NULL DEFAULT 1,
 ` + "`custom_seconds`" + ` bigint NOT NULL DEFAULT 0,
 ` + "`enabled`" + ` numeric DEFAULT 1,
+` + "`visible_to_user`" + ` numeric DEFAULT 1,
 ` + "`sort_order`" + ` integer DEFAULT 0,
 ` + "`stripe_price_id`" + ` varchar(128) DEFAULT '',
 ` + "`creem_product_id`" + ` varchar(128) DEFAULT '',
 ` + "`max_purchase_per_user`" + ` integer DEFAULT 0,
 ` + "`upgrade_group`" + ` varchar(64) DEFAULT '',
+` + "`stackable_bonus`" + ` numeric DEFAULT 0,
+` + "`bonus_model_scope`" + ` varchar(32) DEFAULT '',
 ` + "`total_amount`" + ` bigint NOT NULL DEFAULT 0,
 ` + "`quota_reset_period`" + ` varchar(16) DEFAULT 'never',
 ` + "`quota_reset_custom_seconds`" + ` bigint DEFAULT 0,
@@ -420,18 +429,23 @@ PRIMARY KEY (` + "`id`" + `)
 	}
 	required := []sqliteColumnDef{
 		{Name: "title", DDL: "`title` varchar(128) NOT NULL"},
-		{Name: "subtitle", DDL: "`subtitle` varchar(255) DEFAULT ''"},
+		{Name: "subtitle", DDL: "`subtitle` text DEFAULT ''"},
+		{Name: "display_config", DDL: "`display_config` text DEFAULT ''"},
+		{Name: "display_notes", DDL: "`display_notes` text DEFAULT ''"},
 		{Name: "price_amount", DDL: "`price_amount` decimal(10,6) NOT NULL"},
-		{Name: "currency", DDL: "`currency` varchar(8) NOT NULL DEFAULT 'USD'"},
+		{Name: "currency", DDL: "`currency` varchar(8) NOT NULL DEFAULT 'CNY'"},
 		{Name: "duration_unit", DDL: "`duration_unit` varchar(16) NOT NULL DEFAULT 'month'"},
 		{Name: "duration_value", DDL: "`duration_value` integer NOT NULL DEFAULT 1"},
 		{Name: "custom_seconds", DDL: "`custom_seconds` bigint NOT NULL DEFAULT 0"},
 		{Name: "enabled", DDL: "`enabled` numeric DEFAULT 1"},
+		{Name: "visible_to_user", DDL: "`visible_to_user` numeric DEFAULT 1"},
 		{Name: "sort_order", DDL: "`sort_order` integer DEFAULT 0"},
 		{Name: "stripe_price_id", DDL: "`stripe_price_id` varchar(128) DEFAULT ''"},
 		{Name: "creem_product_id", DDL: "`creem_product_id` varchar(128) DEFAULT ''"},
 		{Name: "max_purchase_per_user", DDL: "`max_purchase_per_user` integer DEFAULT 0"},
 		{Name: "upgrade_group", DDL: "`upgrade_group` varchar(64) DEFAULT ''"},
+		{Name: "stackable_bonus", DDL: "`stackable_bonus` numeric DEFAULT 0"},
+		{Name: "bonus_model_scope", DDL: "`bonus_model_scope` varchar(32) DEFAULT ''"},
 		{Name: "total_amount", DDL: "`total_amount` bigint NOT NULL DEFAULT 0"},
 		{Name: "quota_reset_period", DDL: "`quota_reset_period` varchar(16) DEFAULT 'never'"},
 		{Name: "quota_reset_custom_seconds", DDL: "`quota_reset_custom_seconds` bigint DEFAULT 0"},
@@ -561,6 +575,32 @@ func migrateSubscriptionPlanPriceAmount() {
 		}
 	}
 }
+
+// migrateSubscriptionPlanCurrencyToCNY normalizes legacy subscription plan currencies to CNY.
+// Subscription purchase price is now fixed to CNY regardless of historical data.
+func migrateSubscriptionPlanCurrencyToCNY() {
+	tableName := "subscription_plans"
+	columnName := "currency"
+
+	if !DB.Migrator().HasTable(tableName) {
+		return
+	}
+	if !DB.Migrator().HasColumn(&SubscriptionPlan{}, columnName) {
+		return
+	}
+
+	updateMap := map[string]interface{}{
+		"currency":   "CNY",
+		"updated_at": common.GetTimestamp(),
+	}
+	if err := DB.Table(tableName).
+		Where("UPPER(currency) <> ?", "CNY").
+		Updates(updateMap).Error; err != nil {
+		common.SysLog(fmt.Sprintf("Warning: failed to normalize %s.%s to CNY: %v", tableName, columnName, err))
+		return
+	}
+}
+
 
 func closeDB(db *gorm.DB) error {
 	sqlDB, err := db.DB()
