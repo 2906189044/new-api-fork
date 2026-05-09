@@ -10,14 +10,26 @@ This repository keeps official New API upgrade access while carrying local, ligh
 - `custom/frontend-ui`: long-lived local customization branch. Put frontend UI changes here.
 - `feature/ui-*`: short-lived branches for individual UI tasks, created from `custom/frontend-ui`.
 
+Recommended local safety setting:
+
+```bash
+git remote set-url --push upstream DISABLED
+```
+
+This makes `upstream` effectively read-only and keeps all pushes pointed at `origin`.
+
 ## Daily UI Change Flow
 
 Start each UI task from the customization branch:
 
 ```bash
-git fetch upstream origin --prune
+git fetch --all --prune
+git switch main
+git reset --hard upstream/main
 git switch custom/frontend-ui
-git rebase upstream/main
+git pull --rebase origin custom/frontend-ui
+git rebase main
+git push --force-with-lease origin custom/frontend-ui
 git switch -c feature/ui-<short-name>
 ```
 
@@ -47,12 +59,13 @@ Use normal merge instead of `--ff-only` only when the feature branch has intenti
 Use this when official New API has new commits:
 
 ```bash
-git fetch upstream origin --prune
+git fetch --all --prune
 git switch main
 git reset --hard upstream/main
 git push --force-with-lease origin main:main
 
 git switch custom/frontend-ui
+git pull --rebase origin custom/frontend-ui
 git rebase main
 ```
 
